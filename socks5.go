@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"golang.org/x/net/context"
+	"sync"
 )
 
 const (
@@ -55,6 +56,10 @@ type Config struct {
 type Server struct {
 	config      *Config
 	authMethods map[uint8]Authenticator
+
+	listener   net.Listener
+	activeConn map[net.Conn]struct{}
+	mu         sync.Mutex
 }
 
 // New creates a new Server and potentially returns an error
@@ -102,17 +107,26 @@ func (s *Server) ListenAndServe(network, addr string) error {
 	if err != nil {
 		return err
 	}
+
+	s.listener = l
+	s.activeConn = make(map[net.Conn]struct{})
+
 	return s.Serve(l)
 }
 
 // Serve is used to serve connections from a listener
 func (s *Server) Serve(l net.Listener) error {
+
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			return err
 		}
-		go s.ServeConn(conn)
+		go func() {
+			s.trackConn(conn)
+			s.ServeConn(conn)
+			s.untrackConn(conn)
+		}()
 	}
 	return nil
 }
@@ -166,4 +180,32 @@ func (s *Server) ServeConn(conn net.Conn) error {
 	}
 
 	return nil
+}
+
+// Close close listener and connections
+func (s *Server) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	err := s.listener.Close()
+
+	for c := range s.activeConn {
+		c.Close()
+		delete(s.activeConn, c)
+	}
+
+	return err
+
+}
+
+func (s *Server) trackConn(c net.Conn) {
+	s.mu.Lock()
+	s.activeConn[c] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *Server) untrackConn(c net.Conn) {
+	s.mu.Lock()
+	delete(s.activeConn, c)
+	s.mu.Unlock()
 }
